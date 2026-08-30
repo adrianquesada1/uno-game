@@ -1,3 +1,4 @@
+import base64
 import io
 import math
 import random
@@ -153,12 +154,22 @@ def flag_turn_chime_on_transition(is_my_turn):
 
 
 def play_chime_if_flagged():
+    """Reproduce el aviso sin mostrar ninguna barra de reproductor: en vez de
+    st.audio() (que siempre dibuja sus propios controles) inyectamos un
+    <audio autoplay> sin el atributo 'controls', que por definición en HTML
+    no muestra nada en pantalla."""
     if st.session_state.get("_chime_flag"):
         st.session_state["_chime_flag"] = False
-        try:
-            st.audio(generate_turn_chime(), format="audio/wav", autoplay=True)
-        except TypeError:
-            pass  # versión antigua sin autoplay: preferimos silencio a romper la app
+        b64 = base64.b64encode(generate_turn_chime()).decode("ascii")
+        html = (
+            f'<audio autoplay style="display:none">'
+            f'<source src="data:audio/wav;base64,{b64}" type="audio/wav">'
+            f"</audio>"
+        )
+        if hasattr(st, "html"):
+            st.html(html)
+        else:
+            st.markdown(html, unsafe_allow_html=True)
 
 
 # ----------------------------------------------------------------------------
@@ -492,11 +503,31 @@ def bot_choose_color(hand):
 
 BOT_MIN_DELAY = 3.0
 BOT_MAX_DELAY = 5.0
+BOT_CATCH_CHANCE = 0.5  # los bots no vigilan al instante: solo lo intentan cuando les toca pensar su turno
+
+
+def find_vulnerable_human(gs):
+    """Un humano con 1 carta que todavía no ha cantado UNO."""
+    for p in gs.players:
+        if not p["is_bot"] and len(p["hand"]) == 1 and not p["called_uno"]:
+            return p
+    return None
 
 
 def bot_take_turn(gs, idx):
-    time.sleep(random.uniform(BOT_MIN_DELAY, BOT_MAX_DELAY))  # el bot "piensa" antes de jugar
+    time.sleep(random.uniform(BOT_MIN_DELAY, BOT_MAX_DELAY))  # el bot "piensa" antes de actuar
     player = gs.players[idx]
+
+    # Antes de jugar, el bot puede fijarse en si algún humano se ha quedado
+    # en 1 carta sin cantar UNO. Ojo: esto SOLO se comprueba aquí, tras el
+    # retraso normal del turno del bot -- así el humano siempre tiene, como
+    # mínimo, esos 3-5 segundos para pulsar "¡CANTO UNO!" antes de que
+    # ningún bot pueda pillarlo. Nunca se pilla al instante.
+    victim = find_vulnerable_human(gs)
+    if victim is not None and random.random() < BOT_CATCH_CHANCE:
+        catch_uno(gs, player, victim)
+        return
+
     card = bot_choose_card(gs, player["hand"])
     if card is None:
         player_draws_and_passes(gs, player)
@@ -595,7 +626,12 @@ def render_hand_and_actions(gs, player, my_index, on_turn_end, auto_call_uno):
     top = gs.discard[-1]
     is_my_turn = gs.turn == my_index
 
-    if len(player["hand"]) == 1 and not player["called_uno"] and is_my_turn:
+    # OJO: el aviso de "¡CANTO UNO!" NO debe depender de si es tu turno.
+    # En cuanto juegas la penúltima carta, el turno pasa al siguiente
+    # jugador en el mismo instante (resolve_after_play ya lo mueve dentro
+    # de play_card), así que si este botón exigiera is_my_turn, jamás
+    # llegarías a verlo: desaparecería justo cuando más lo necesitas.
+    if len(player["hand"]) == 1 and not player["called_uno"]:
         if st.button("¡CANTO UNO!", type="primary", icon=":material/campaign:", use_container_width=True):
             call_uno(player)
             st.rerun()
@@ -629,7 +665,10 @@ def render_hand_and_actions(gs, player, my_index, on_turn_end, auto_call_uno):
 
     if st.session_state.get("pending_wild"):
         card = next((c for c in player["hand"] if c["id"] == st.session_state.pending_wild), None)
-        if card is None:
+        if card is None or not is_my_turn:
+            # Por seguridad: si por lo que sea ya no es tu turno cuando esto
+            # se procesa, cancelamos la selección en vez de arriesgarnos a
+            # confirmar una jugada fuera de turno.
             st.session_state.pending_wild = None
         else:
             st.markdown("##### 🎨 Elige un color")
